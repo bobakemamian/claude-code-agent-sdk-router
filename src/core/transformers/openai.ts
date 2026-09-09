@@ -21,6 +21,11 @@ export class OpenAITransformer implements Transformer {
     // Strip fields OpenAI doesn't understand
     delete body.reasoning;
 
+    // OpenAI streaming returns no usage chunk unless explicitly requested
+    if (body.stream) {
+      body.stream_options = { include_usage: true };
+    }
+
     // Strip cache_control from messages (OpenAI doesn't support it)
     if (body.messages) {
       for (const msg of body.messages) {

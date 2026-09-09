@@ -18,6 +18,10 @@ export class OpenRouterTransformer implements Transformer {
   async transformRequestIn(request: UnifiedChatRequest, provider: ProviderConfig): Promise<Record<string, any>> {
     const isClaude = request.model.includes('claude');
     const isGemini = request.model.includes('google/') || request.model.includes('gemini');
+    // OpenRouter normalizes cache_control breakpoints for Anthropic, Gemini,
+    // and OpenAI models (interchangeable markers). Keep them for those;
+    // strip for the rest, which may reject unknown fields with a 400.
+    const keepsCacheControl = isClaude || isGemini || request.model.startsWith('openai/');
 
     // Sanitize tool names for Gemini models (rejects consecutive underscores)
     if (isGemini && request.tools?.length) {
@@ -39,7 +43,7 @@ export class OpenRouterTransformer implements Transformer {
     for (const msg of request.messages) {
       if (Array.isArray(msg.content)) {
         for (const item of msg.content as any[]) {
-          if (!isClaude && item.cache_control) {
+          if (!keepsCacheControl && item.cache_control) {
             delete item.cache_control;
           }
           if (item.type === 'image_url') {
@@ -49,7 +53,7 @@ export class OpenRouterTransformer implements Transformer {
             delete item.media_type;
           }
         }
-      } else if (!isClaude && (msg as any).cache_control) {
+      } else if (!keepsCacheControl && (msg as any).cache_control) {
         delete (msg as any).cache_control;
       }
     }
@@ -149,7 +153,10 @@ export class OpenRouterTransformer implements Transformer {
           try {
             const data = JSON.parse(line.slice(6));
 
-            if (data.usage) {
+            // OpenRouter's usage chunk repeats the real finish_reason (e.g.
+            // "length" on truncation) — never overwrite it, only fill it in
+            // when absent so the Anthropic side sees a terminal chunk.
+            if (data.usage && data.choices?.[0] && data.choices[0].finish_reason == null) {
               data.choices[0].finish_reason = hasToolCall ? 'tool_calls' : 'stop';
             }
 
