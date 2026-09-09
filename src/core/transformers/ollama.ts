@@ -15,6 +15,11 @@ export class OllamaTransformer implements Transformer {
     // Strip fields Ollama doesn't support
     delete body.reasoning;
 
+    // Request the final usage chunk when streaming (OpenAI-compatible)
+    if (body.stream) {
+      body.stream_options = { include_usage: true };
+    }
+
     // Strip cache_control from messages
     if (body.messages) {
       for (const msg of body.messages) {

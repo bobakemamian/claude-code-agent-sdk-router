@@ -149,7 +149,10 @@ export class OpenRouterTransformer implements Transformer {
           try {
             const data = JSON.parse(line.slice(6));
 
-            if (data.usage) {
+            // OpenRouter's usage chunk repeats the real finish_reason (e.g.
+            // "length" on truncation) — never overwrite it, only fill it in
+            // when absent so the Anthropic side sees a terminal chunk.
+            if (data.usage && data.choices?.[0] && data.choices[0].finish_reason == null) {
               data.choices[0].finish_reason = hasToolCall ? 'tool_calls' : 'stop';
             }
 

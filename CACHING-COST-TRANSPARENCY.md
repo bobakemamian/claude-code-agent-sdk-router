@@ -401,10 +401,19 @@ of the mapped usage — not breakpoint emission and not OpenRouter.
 ### 7.4 Revised plan
 
 1. **F2** — shared `mapOpenAIUsage()` helper at the three `anthropic.ts` call
-   sites; the only actual billing error (writes under-billed 25%).
+   sites; the only actual billing error (writes under-billed 25%). **DONE**
+   (`src/core/utils/openaiToAnthropic.ts`).
 2. **F5** — only set `finish_reason` when null/undefined; guard `choices?.[0]`.
+   **DONE** (`openrouter.ts`).
 3. **F4 + F3** — `stream_options: {include_usage: true}` for openai/groq/ollama
    (skip mistral pending its 422 check); remove the `break`; delete `hasFinished`.
-4. **F12** — offline fixture tests for the above.
+   **DONE** (`openai.ts`, `groq.ts`, `ollama.ts`, `anthropic.ts`).
+4. **F12** — offline fixture tests for the above. **DONE**
+   (`tests/unit/streamUsage.test.ts`, `npm run test:unit` — 7 cases, no keys needed).
 5. F10/F11 audit fields — later, if MyAlly wants them. **F6, F8: no action.**
    F7, F9: optional.
+
+E2e smoke test through the running proxy (default route,
+`openai/gpt-5.1-codex-mini` via OpenRouter, `max_tokens: 5`, ≈4k-token stable
+system prefix, two turns): turn 1 `stop_reason: "max_tokens"` (was `end_turn`
+pre-fix), turn 2 `cache_read_input_tokens: 3968` in `message_delta.usage`.

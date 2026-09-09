@@ -11,6 +11,7 @@ import { formatBase64 } from '../utils/image';
 import { getThinkLevel } from '../utils/thinking';
 import { createApiError } from '../api/middleware';
 import { generateId, generateMessageId, generateToolUseId } from '../utils/id';
+import { mapOpenAIUsage } from '../utils/openaiToAnthropic';
 
 export class AnthropicTransformer implements Transformer {
   name = 'Anthropic';
@@ -192,7 +193,6 @@ export class AnthropicTransformer implements Transformer {
         let model = 'unknown';
         let hasStarted = false;
         let hasTextContentStarted = false;
-        let hasFinished = false;
         let isThinkingStarted = false;
         let isClosed = false;
         let contentIndex = 0;
@@ -227,7 +227,7 @@ export class AnthropicTransformer implements Transformer {
             emitEvent('message_delta', {
               type: 'message_delta',
               delta: { stop_reason: 'end_turn', stop_sequence: null },
-              usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 },
+              usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
             });
           }
 
@@ -252,7 +252,7 @@ export class AnthropicTransformer implements Transformer {
             buffer = lines.pop() || '';
 
             for (const line of lines) {
-              if (isClosed || hasFinished) break;
+              if (isClosed) break;
               if (!line.startsWith('data:')) continue;
 
               const data = line.slice(5).trim();
@@ -285,11 +285,7 @@ export class AnthropicTransformer implements Transformer {
 
                 // Track usage for final message_delta
                 if (chunk.usage) {
-                  const usage = {
-                    input_tokens: (chunk.usage.prompt_tokens || 0) - (chunk.usage.prompt_tokens_details?.cached_tokens || 0),
-                    output_tokens: chunk.usage.completion_tokens || 0,
-                    cache_read_input_tokens: chunk.usage.prompt_tokens_details?.cached_tokens || 0,
-                  };
+                  const usage = mapOpenAIUsage(chunk.usage);
                   if (!stopReasonMessageDelta) {
                     stopReasonMessageDelta = { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage };
                   } else {
@@ -300,7 +296,7 @@ export class AnthropicTransformer implements Transformer {
                 if (!choice) continue;
 
                 // Thinking content
-                if (choice.delta?.thinking && !isClosed && !hasFinished) {
+                if (choice.delta?.thinking && !isClosed) {
                   if (!isThinkingStarted) {
                     const idx = assignBlockIndex();
                     emitEvent('content_block_start', { type: 'content_block_start', index: idx, content_block: { type: 'thinking', thinking: '' } });
@@ -317,7 +313,7 @@ export class AnthropicTransformer implements Transformer {
                 }
 
                 // Text content
-                if (choice.delta?.content && !isClosed && !hasFinished) {
+                if (choice.delta?.content && !isClosed) {
                   // Close non-text block if open
                   if (currentContentBlockIndex >= 0 && !hasTextContentStarted) {
                     emitEvent('content_block_stop', { type: 'content_block_stop', index: currentContentBlockIndex });
@@ -335,7 +331,7 @@ export class AnthropicTransformer implements Transformer {
                 }
 
                 // Annotations (web search results)
-                if (choice.delta?.annotations?.length && !isClosed && !hasFinished) {
+                if (choice.delta?.annotations?.length && !isClosed) {
                   if (currentContentBlockIndex >= 0 && hasTextContentStarted) {
                     emitEvent('content_block_stop', { type: 'content_block_stop', index: currentContentBlockIndex });
                     currentContentBlockIndex = -1;
@@ -357,7 +353,7 @@ export class AnthropicTransformer implements Transformer {
                 }
 
                 // Tool calls
-                if (choice.delta?.tool_calls && !isClosed && !hasFinished) {
+                if (choice.delta?.tool_calls && !isClosed) {
                   const processed = new Set<number>();
                   for (const toolCall of choice.delta.tool_calls) {
                     if (isClosed) break;
@@ -399,25 +395,23 @@ export class AnthropicTransformer implements Transformer {
                   }
                 }
 
-                // Finish reason
-                if (choice.finish_reason && !isClosed && !hasFinished) {
+                // Finish reason. No `break` here: the usage chunk may follow in
+                // the same read batch (direct OpenAI-compatible providers) or a
+                // later one — keep consuming until [DONE] / stream end.
+                if (choice.finish_reason && !isClosed) {
                   if (currentContentBlockIndex >= 0) {
                     emitEvent('content_block_stop', { type: 'content_block_stop', index: currentContentBlockIndex });
                     currentContentBlockIndex = -1;
                   }
 
                   const stopMap: Record<string, string> = { stop: 'end_turn', length: 'max_tokens', tool_calls: 'tool_use', content_filter: 'stop_sequence' };
-                  const usage = {
-                    input_tokens: (chunk.usage?.prompt_tokens || 0) - (chunk.usage?.prompt_tokens_details?.cached_tokens || 0),
-                    output_tokens: chunk.usage?.completion_tokens || 0,
-                    cache_read_input_tokens: chunk.usage?.prompt_tokens_details?.cached_tokens || 0,
-                  };
                   stopReasonMessageDelta = {
                     type: 'message_delta',
                     delta: { stop_reason: stopMap[choice.finish_reason] || 'end_turn', stop_sequence: null },
-                    usage,
+                    // A finish chunk without usage must not zero out usage
+                    // captured from an earlier usage-only chunk.
+                    usage: chunk.usage ? mapOpenAIUsage(chunk.usage) : (stopReasonMessageDelta?.usage ?? mapOpenAIUsage(undefined)),
                   };
-                  break;
                 }
               } catch { /* skip unparseable lines */ }
             }
@@ -488,11 +482,7 @@ export class AnthropicTransformer implements Transformer {
         content,
         stop_reason: stopMap[choice.finish_reason] || 'end_turn',
         stop_sequence: null,
-        usage: {
-          input_tokens: (openaiResponse.usage?.prompt_tokens || 0) - (openaiResponse.usage?.prompt_tokens_details?.cached_tokens || 0),
-          output_tokens: openaiResponse.usage?.completion_tokens || 0,
-          cache_read_input_tokens: openaiResponse.usage?.prompt_tokens_details?.cached_tokens || 0,
-        },
+        usage: mapOpenAIUsage(openaiResponse.usage),
       };
     } catch {
       throw createApiError(`Provider error: ${JSON.stringify(openaiResponse)}`, 500, 'provider_error');
