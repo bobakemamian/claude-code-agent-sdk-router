@@ -1,6 +1,6 @@
 # Prompt Caching & Cost Transparency — Findings and Issues
 
-**Status:** exploration notes, no code changed yet
+**Status:** verified by live probes — see §7 addendum (2026-09-09)
 **Baseline:** commit `47e06284` (what ally prod pods run via `Dockerfile` `CCASR_REF`)
 **Date:** 2026-09-09
 **Consumer context:** ally cloud path is `Claude CLI → auth-sidecar → ccasr → OpenRouter`.
@@ -31,6 +31,14 @@ Handoff asks: Fix 1 keep as harmless belt-and-braces; Fix 2 audit-only (sidecar
 distrusts ccasr-reported cost by design); Fix 3 (assistant `cache_control`) is a
 near no-op — Claude Code places breakpoints on system + last user message, not
 assistant.
+
+> **Update 2026-09-09 (live probes, §7):** F1/F2/F5/F10/F11 confirmed;
+> **F8 refuted** (message-level `cache_control` on `tool` messages works);
+> **F6 not recommended** (writes every turn at 1.25×, no benefit over the
+> already-working explicit breakpoints); F9 deprioritized (OpenAI auto-caching
+> hits without `user`). Open question resolved: **`prompt_tokens` includes
+> `cache_write_tokens`** — so F2 is a live 25% under-billing on write turns,
+> not just a visibility gap. Revised priority: F2 → F5 → F4+F3 → F12.
 
 ---
 
@@ -342,3 +350,61 @@ needed for F2–F10; F11 optional consumer wiring.
   `DOCS/plans/openrouter-billing-and-models.md` (D4, P0-B, A12, A19),
   `services/auth-sidecar/app/billing/usage_tee.py`, `manager.py`, `proxy.py`,
   `packages/ally-platform/ally_platform/billing/calculator.py`.
+
+---
+
+## 7. Verification addendum — live probes (2026-09-09)
+
+Six probe sets run **directly against `openrouter.ai/api/v1/chat/completions`**
+(no proxy in between), using the desktop OpenRouter key. Models:
+`anthropic/claude-haiku-4.5` (served by **Amazon Bedrock**) and
+`openai/gpt-5.1-codex-mini` (served by **Azure** — the prod route family).
+Total cost ≈ $0.03. The §1 "verify before relying" caveat is now discharged
+for everything below.
+
+### 7.1 Probe results
+
+| Probe | Setup | Result |
+|---|---|---|
+| A | stream, **no** usage flags, natural stop | Full usage object in final chunk anyway: `prompt_tokens`, `prompt_tokens_details.{cached_tokens, cache_write_tokens, audio_tokens, video_tokens}`, `completion_tokens_details.{reasoning_tokens, image_tokens, audio_tokens}`, `cost`, `is_byok`, `cost_details.{upstream_inference_cost, …prompt_cost, …completions_cost}`. Every chunk carries `id: "gen-…"` and `provider`. Usage chunk has **one choice** with content-free delta **repeating** `finish_reason` + `native_finish_reason` (not `choices: []`). `: OPENROUTER PROCESSING` comment lines observed. |
+| B | stream, `max_tokens: 5` | Usage chunk repeats the real `finish_reason: "length"` / `native_finish_reason: "max_tokens"` — exactly the chunk `openrouter.ts:153` rewrites to `"stop"`. **F5 confirmed live.** |
+| C | block-level `cache_control` on system (≈4.5k tok), 2 turns | Turn 1: `prompt_tokens: 4517`, `cache_write_tokens: 4508`, cost matches 1.25× write pricing. Turn 2: `cached_tokens: 4508`, cost ÷12. **Explicit caching works end-to-end via OpenRouter; `prompt_tokens` INCLUDES `cache_write_tokens`** (4517 = 4508 written + 9 fresh). |
+| D | root-level `cache_control: {type:"ephemeral"}`, no block markers | Accepted (no 400). Wrote 4516 tokens **on both turns**, zero reads (probe replaced the tail; breakpoint sits at end of prompt). Automatic mode = pay 1.25× on the whole prompt every turn, only pays off in strictly append-only loops. |
+| E | `role:"tool"` message, ≈5k tok content, breakpoint variants | **Message-level `cache_control` with string content — ccasr's current emission — works**: wrote 5095, repeat read 5095. Content-part form behaved identically. **F8 refuted.** |
+| F | `openai/gpt-5.1-codex-mini`, ≈4k tok stable prefix, ± `user` | Automatic caching hit **without** `user`: turn 2 `cached_tokens: 3968` of 4071. Provider routing sticky (Azure all 4 calls). `user` made no observable difference. |
+
+### 7.2 Verdicts per finding
+
+| # | Verdict | Notes |
+|---|---|---|
+| F1 | **Confirmed** | Usage always returned streaming + non-streaming, no flags needed. Do not bother adding `usage.include`. |
+| F2 | **Confirmed + sharpened** | `prompt_tokens` includes write tokens → current mapping bills cache writes as plain 1× input. Fix must be `input_tokens = prompt_tokens − cached_tokens − cache_write_tokens` AND emit `cache_creation_input_tokens`. |
+| F3 | **Confirmed (code)** | `break` at `anthropic.ts:420` drops rest of the read batch; `hasFinished` is dead. Live on direct providers once F4 lands. |
+| F4 | **Confirmed (code)** | No `stream_options.include_usage` in openai/groq/ollama/mistral transformers. Not live-probed (no direct OpenAI key on this machine). |
+| F5 | **Confirmed live** | Probe B. Truncations reported as `end_turn` today. |
+| F6 | **Works, but DROP** | Probe D: accepted, but writes every turn at 1.25× while explicit breakpoints already work (probes C, E). Net cost increase, no benefit. |
+| F7 | Unverified | Gemini-via-OpenRouter not probed. Optional. |
+| F8 | **REFUTED** | Probe E. Current message-level emission lands. No change needed. |
+| F9 | **Deprioritized** | Probe F: OpenAI auto-caching hits without `user`; routing already sticky. Nice-to-have only. |
+| F10 | **Confirmed** | `gen-…` id on every chunk. Low priority (audit). |
+| F11 | **Confirmed** | `cost` / `is_byok` / `cost_details` / `provider` / `reasoning_tokens` all present. Low priority (audit). |
+| F12 | Valid | Still no offline tests. |
+
+### 7.3 Prod implication
+
+Both caching paths work upstream out of the box: Claude-model explicit
+breakpoints flow through ccasr correctly (C, E), and OpenAI-model automatic
+caching hits with no request-side changes (F). If prod observes
+`cached_tokens = 0`, the cause is prompt-prefix churn or consumer-side reading
+of the mapped usage — not breakpoint emission and not OpenRouter.
+
+### 7.4 Revised plan
+
+1. **F2** — shared `mapOpenAIUsage()` helper at the three `anthropic.ts` call
+   sites; the only actual billing error (writes under-billed 25%).
+2. **F5** — only set `finish_reason` when null/undefined; guard `choices?.[0]`.
+3. **F4 + F3** — `stream_options: {include_usage: true}` for openai/groq/ollama
+   (skip mistral pending its 422 check); remove the `break`; delete `hasFinished`.
+4. **F12** — offline fixture tests for the above.
+5. F10/F11 audit fields — later, if MyAlly wants them. **F6, F8: no action.**
+   F7, F9: optional.
