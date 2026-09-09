@@ -410,8 +410,15 @@ of the mapped usage — not breakpoint emission and not OpenRouter.
    **DONE** (`openai.ts`, `groq.ts`, `ollama.ts`, `anthropic.ts`).
 4. **F12** — offline fixture tests for the above. **DONE**
    (`tests/unit/streamUsage.test.ts`, `npm run test:unit` — 7 cases, no keys needed).
-5. F10/F11 audit fields — later, if MyAlly wants them. **F6, F8: no action.**
-   F7, F9: optional.
+5. **F7** — allowlist `cache_control` for Claude/Gemini/`openai/*` via
+   OpenRouter, keep the strip for other models. **DONE** (`openrouter.ts`).
+   Probe G verified: Gemini and OpenAI models accept the markers (no 400);
+   Gemini explicit breakpoint wrote 8599 tokens then read them back at ~2.6×
+   cost reduction. Probe G also showed Gemini double-reports
+   `cached_tokens` = `cache_write_tokens` on the write turn, so
+   `mapOpenAIUsage()` clamps the classes to sum ≤ `prompt_tokens`.
+6. F10/F11 audit fields — later, if MyAlly wants them. **F6, F8: no action.**
+   F9: optional.
 
 E2e smoke test through the running proxy (default route,
 `openai/gpt-5.1-codex-mini` via OpenRouter, `max_tokens: 5`, ≈4k-token stable

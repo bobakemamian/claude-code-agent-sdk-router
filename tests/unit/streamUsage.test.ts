@@ -61,6 +61,42 @@ const tests: Array<[string, () => Promise<void>]> = [
     assert.deepEqual(mapOpenAIUsage(undefined), { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 });
   }],
 
+  // Gemini via OpenRouter double-reports (probe G: cached = write = 8599 on
+  // prompt 8601) — classes must still sum to prompt_tokens.
+  ['mapOpenAIUsage: overlapping cached/write clamps to prompt_tokens', async () => {
+    const u = mapOpenAIUsage({
+      prompt_tokens: 8601, completion_tokens: 2,
+      prompt_tokens_details: { cached_tokens: 8599, cache_write_tokens: 8599 },
+    });
+    assert.equal(u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens, 8601);
+    assert.equal(u.cache_read_input_tokens, 8599);
+    assert.equal(u.input_tokens, 0);
+  }],
+
+  // F7: cache_control kept for Claude/Gemini/OpenAI models, stripped otherwise.
+  ['F7: cache_control kept for gemini/openai models, stripped for others', async () => {
+    const mkRequest = (model: string): any => ({
+      model, max_tokens: 10,
+      messages: [
+        { role: 'system', content: [{ type: 'text', text: 'ctx', cache_control: { type: 'ephemeral' } }] },
+        { role: 'tool', content: 'result', tool_call_id: 'c1', cache_control: { type: 'ephemeral' } },
+      ],
+    });
+    const provider: any = { name: 'openrouter', api_base_url: 'x', api_key: 'k' };
+    for (const [model, kept] of [
+      ['anthropic/claude-haiku-4.5', true],
+      ['google/gemini-3-flash-preview', true],
+      ['openai/gpt-5.1-codex-mini', true],
+      ['meta-llama/llama-3.3-70b-instruct', false],
+    ] as Array<[string, boolean]>) {
+      const { body } = await new OpenRouterTransformer().transformRequestIn(mkRequest(model), provider);
+      const blockCC = (body as any).messages[0].content[0].cache_control;
+      const msgCC = (body as any).messages[1].cache_control;
+      assert.equal(!!blockCC, kept, `${model}: block-level cache_control kept=${kept}`);
+      assert.equal(!!msgCC, kept, `${model}: message-level cache_control kept=${kept}`);
+    }
+  }],
+
   // F3: OpenAI spec shape — finish chunk, then usage chunk with choices: [],
   // BOTH in the same read batch. Pre-fix, the `break` dropped the usage line.
   ['F3: usage chunk in same read batch as finish chunk survives', async () => {

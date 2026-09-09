@@ -22,10 +22,16 @@ export interface AnthropicUsage {
 }
 
 export function mapOpenAIUsage(usage: any): AnthropicUsage {
-  const cached = usage?.prompt_tokens_details?.cached_tokens || 0;
-  const written = usage?.prompt_tokens_details?.cache_write_tokens || 0;
+  const prompt = usage?.prompt_tokens || 0;
+  // Some providers report overlapping classes (probe G: Gemini via OpenRouter
+  // returned cached_tokens = cache_write_tokens = 8599 on prompt_tokens 8601).
+  // Clamp so the three classes never sum to more than prompt_tokens — the
+  // consumer prices tokens × catalog per class, so conservation matters more
+  // than preserving a double-reported write count.
+  const cached = Math.min(usage?.prompt_tokens_details?.cached_tokens || 0, prompt);
+  const written = Math.min(usage?.prompt_tokens_details?.cache_write_tokens || 0, prompt - cached);
   return {
-    input_tokens: Math.max(0, (usage?.prompt_tokens || 0) - cached - written),
+    input_tokens: prompt - cached - written,
     output_tokens: usage?.completion_tokens || 0,
     cache_read_input_tokens: cached,
     cache_creation_input_tokens: written,
